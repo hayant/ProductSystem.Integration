@@ -63,9 +63,56 @@ public class ProductsApiClient : IProductsApiClient
         }
     }
 
+    public async Task<BatchCreateOutcome> CreateBatchAsync(IReadOnlyList<CreateProductRequest> batch, CancellationToken ct = default)
+    {
+        try
+        {
+            using var response = await _http.PostAsJsonAsync("products/batch", batch, ct);
+
+            if (response.IsSuccessStatusCode)
+            {
+                // The API answers 200 with per-item outcomes even when some records were
+                // duplicates/invalid. invalid records are folded into Failed alongside any
+                // transport error, mirroring the single-create mapping.
+                var body = await response.Content.ReadFromJsonAsync<BatchCreateResponse>(ct);
+                if (body is null)
+                {
+                    _logger.LogWarning("Batch create returned {Status} with an unreadable body for {Count} products",
+                        (int)response.StatusCode, batch.Count);
+                    return new BatchCreateOutcome(0, 0, batch.Count);
+                }
+
+                return new BatchCreateOutcome(body.Created, body.Duplicate, body.Invalid);
+            }
+
+            // A non-2xx means the whole batch request failed (e.g. malformed body, auth, server
+            // error) — count every product in it as Failed; the next run retries.
+            var errorBody = await SafeReadBody(response, ct);
+            _logger.LogWarning(
+                "Batch create failed for {Count} products: HTTP {Status} {Body}",
+                batch.Count, (int)response.StatusCode, errorBody);
+            return new BatchCreateOutcome(0, 0, batch.Count);
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogError(ex, "HTTP error calling batch Products API for {Count} products", batch.Count);
+            return new BatchCreateOutcome(0, 0, batch.Count);
+        }
+        catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
+        {
+            // HttpClient throws TaskCanceledException on timeout (not just cancellation).
+            _logger.LogError(ex, "Timeout calling batch Products API for {Count} products", batch.Count);
+            return new BatchCreateOutcome(0, 0, batch.Count);
+        }
+    }
+
     private static async Task<string> SafeReadBody(HttpResponseMessage response, CancellationToken ct)
     {
         try { return await response.Content.ReadAsStringAsync(ct); }
         catch { return "<unreadable>"; }
     }
+
+    // Mirrors the API's batch response shape — re-declared here because the worker must not
+    // reference ProductSystem.Shared. Only the aggregate counts are needed by the sync.
+    private record BatchCreateResponse(int Created, int Duplicate, int Invalid);
 }

@@ -9,3 +9,8 @@ public enum CreateProductOutcome
     Duplicate,  // 409 — already exists, idempotent skip
     Failed      // anything else (validation, auth, network, server error)
 }
+
+// Aggregate result of a batch create. The same three outcomes as the single-create path, just
+// counted: Duplicate folds in already-existing SKUs (idempotent skips), Failed folds in invalid
+// records plus any transport/server failure of the whole batch.
+public record BatchCreateOutcome(int Created, int Duplicate, int Failed);

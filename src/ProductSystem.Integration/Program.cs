@@ -28,8 +28,18 @@ host.Services.AddHttpClient<IProductsApiClient, ProductsApiClient>(client =>
     client.Timeout = TimeSpan.FromSeconds(10);
 });
 
-host.Services.AddSingleton<IErpClient, FakeErpClient>();
-host.Services.AddScoped<SyncService>();
+// FakeErpClient can emit a large synthetic changeset (Erp:SyntheticProductCount) for scale
+// testing; 0 keeps the fixed demo catalog.
+var syntheticCount = host.Configuration.GetValue("Erp:SyntheticProductCount", 0);
+host.Services.AddSingleton<IErpClient>(_ => new FakeErpClient(syntheticCount));
+
+// Batch size for the inbound sync — read from config so it's tunable per environment.
+var batchSize = host.Configuration.GetValue("Sync:BatchSize", 500);
+host.Services.AddScoped(sp => new SyncService(
+    sp.GetRequiredService<IErpClient>(),
+    sp.GetRequiredService<IProductsApiClient>(),
+    sp.GetRequiredService<ILogger<SyncService>>(),
+    batchSize));
 
 var app = host.Build();
 
