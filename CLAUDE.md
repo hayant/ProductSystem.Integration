@@ -36,7 +36,7 @@ There are no tests yet.
 ## Architecture
 
 ### A run-once worker, not a service
-The single project (`net8.0`, Worker SDK) is a console app that runs **one inbound sync pass and
+The single project (`net10.0`, Worker SDK) is a console app that runs **one inbound sync pass and
 exits** — `Program.cs` builds the host, resolves `SyncService`, awaits `RunInboundAsync`, done.
 There is deliberately no scheduler; production would host this as a `BackgroundService` or a
 cron-triggered job (the comment in `Program.cs` spells this out). The sync watermark is computed

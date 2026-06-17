@@ -18,17 +18,20 @@ public class SyncService
     private readonly IErpClient _erp;
     private readonly IProductsApiClient _api;
     private readonly ILogger<SyncService> _logger;
+    private readonly int _batchSize;
 
-    public SyncService(IErpClient erp, IProductsApiClient api, ILogger<SyncService> logger)
+    public SyncService(IErpClient erp, IProductsApiClient api, ILogger<SyncService> logger, int batchSize = 500)
     {
         _erp = erp;
         _api = api;
         _logger = logger;
+        // Guard against a misconfigured non-positive batch size.
+        _batchSize = batchSize > 0 ? batchSize : 500;
     }
 
     public async Task<SyncResult> RunInboundAsync(DateTime since, CancellationToken ct = default)
     {
-        _logger.LogInformation("Starting inbound sync, watermark: {Since}", since);
+        _logger.LogInformation("Starting inbound sync, watermark: {Since}, batch size: {BatchSize}", since, _batchSize);
         var changed = await _erp.FetchChangedProductsAsync(since, ct);
         _logger.LogInformation("ERP returned {Count} changed products", changed.Count);
 
@@ -36,27 +39,19 @@ public class SyncService
         var skipped = 0;
         var failed = 0;
 
-        foreach (var erpProduct in changed)
+        // Send the changeset in batches rather than one request per product: N changed products
+        // become ceil(N / batchSize) HTTP round-trips. A 409-style duplicate within a batch is an
+        // idempotent skip, and a failed batch is counted but doesn't abort the run.
+        foreach (var chunk in changed.Chunk(_batchSize))
         {
-            var request = new CreateProductRequest(erpProduct.Sku, erpProduct.Name, erpProduct.Price);
-            var outcome = await _api.CreateAsync(request, ct);
+            var batch = chunk
+                .Select(p => new CreateProductRequest(p.Sku, p.Name, p.Price))
+                .ToList();
 
-            switch (outcome)
-            {
-                case CreateProductOutcome.Created:
-                    created++;
-                    break;
-                case CreateProductOutcome.Duplicate:
-                    // Already synced on a previous run — idempotent no-op.
-                    skipped++;
-                    break;
-                case CreateProductOutcome.Failed:
-                    // The API client has already logged the detail.
-                    // One bad record doesn't block the rest; in production this
-                    // would also write to a sync_failures table for review.
-                    failed++;
-                    break;
-            }
+            var outcome = await _api.CreateBatchAsync(batch, ct);
+            created += outcome.Created;
+            skipped += outcome.Duplicate;  // already synced on a previous run — idempotent no-op
+            failed += outcome.Failed;      // invalid records + any whole-batch transport/server failure
         }
 
         _logger.LogInformation(
